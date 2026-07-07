@@ -1,0 +1,59 @@
+# ============================================================================
+# MODEL-AGNOSTIC CONFIG
+# Launch day: the hackathon reveals the available Fireworks models. Edit ONLY
+# this file to swap them in. No code changes required.
+#
+# Fireworks model ids look like: accounts/fireworks/models/<name>
+# List available models: https://app.fireworks.ai/models  (or the API)
+# ============================================================================
+
+api:
+  base_url: https://api.fireworks.ai/inference/v1
+  # Audio endpoint. Fireworks serves whisper at the same base in most regions.
+  audio_base_url: https://api.fireworks.ai/inference/v1
+  timeout_s: 120
+  max_retries: 5          # tenacity handles backoff on 429/5xx
+
+# --- STAGE A: Understanding (vision) -----------------------------------------
+# Extracts neutral ground-truth facts from frames + transcript. Accuracy engine.
+# Prefer a multimodal model. If a Gemma-3 vision model is offered, use it here
+# to strengthen the "Best Use of Gemma" prize story.
+understand:
+  model: accounts/fireworks/models/qwen2p5-vl-72b-instruct   # PLACEHOLDER - swap launch day
+  supports_vision: true
+  max_images: 16          # frames per request; sampler caps to this
+  image_max_edge: 768     # px; resize longest edge to save tokens
+  image_format: jpeg
+  image_quality: 85
+  temperature: 0.2        # low = factual
+  max_tokens: 1500
+
+# --- STAGE B: Style rendering (text) -----------------------------------------
+# Turns the ground-truth into 4 styled captions. Tone engine.
+# Set model to a Gemma text model to maximize Gemma-prize eligibility, e.g.
+#   accounts/fireworks/models/gemma-3-27b-it
+style:
+  model: accounts/fireworks/models/gemma-3-27b-it            # PLACEHOLDER - swap launch day
+  supports_vision: false
+  temperature: 0.85       # higher = more creative for humor/sarcasm
+  max_tokens: 400
+
+# --- JUDGE: local eval (should differ from generator to avoid self-bias) -----
+judge:
+  model: accounts/fireworks/models/llama-v3p3-70b-instruct   # PLACEHOLDER - swap launch day
+  supports_vision: false
+  temperature: 0.0
+  max_tokens: 800
+
+# --- ASR: audio transcription ------------------------------------------------
+asr:
+  backend: fireworks      # fireworks | local | none
+  model: whisper-v3       # fireworks audio model id
+  # local backend uses faster-whisper; set size below if backend=local
+  local_model_size: base
+
+# --- Self-critique regeneration loop (optional, costs credits) ---------------
+critique:
+  enabled: true
+  min_score: 7.0          # regenerate a style if judged accuracy or tone < this
+  max_retries: 1          # extra regen attempts per style

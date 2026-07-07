@@ -1,0 +1,11 @@
+# Core
+openai>=1.40.0          # OpenAI-compatible client -> pointed at Fireworks
+pyyaml>=6.0             # model/style config
+python-dotenv>=1.0.0   # load FIREWORKS_API_KEY from .env
+tenacity>=8.2.0        # retries / exponential backoff for API calls
+pillow>=10.0.0         # frame resize/encode
+tqdm>=4.66.0           # batch progress
+
+# Optional local ASR fallback (only needed if --asr-backend local).
+# Kept out of the default Docker image to stay slim; install on demand.
+# faster-whisper>=1.0.0

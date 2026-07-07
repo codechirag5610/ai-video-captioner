@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lablab-track2-captioner"
+version = "0.1.0"
+description = "Four-style video captioner (formal / sarcastic / humorous-tech / humorous-non-tech) for the AMD Developer Hackathon Act II, Track 2."
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.40.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+    "tenacity>=8.2.0",
+    "pillow>=10.0.0",
+    "tqdm>=4.66.0",
+]
+
+[project.scripts]
+captioner = "captioner.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
