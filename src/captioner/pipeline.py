@@ -1,4 +1,8 @@
-"""Per-clip orchestration: preprocess -> understand -> style -> (critique loop).
+"""Per-clip orchestration (best-of-N engine).
+
+    preprocess -> ASR -> Stage A fact sheet -> Stage 3 comedy material
+    -> Stage 4 generate N candidates/style -> Stage 5 judge-select winner/style
+    -> bounded regeneration for weak styles
 
 One public entry point, `process_clip`, returns a fully-formed result dict for a
 single video. Batch-level concerns (walking a directory, error isolation, writing
@@ -13,14 +17,15 @@ from pathlib import Path
 from typing import Any
 
 from . import asr as asr_mod
+from . import comedy as comedy_mod
 from . import styles as styles_mod
 from . import understand as understand_mod
 from .cache import Cache, video_hash
 from .client import FireworksClient
 from .config import Config
-from .judge import judge as judge_fn
+from .judge import select_best
 from .preprocess import preprocess
-from .styles import STYLE_LABELS, STYLES
+from .styles import HUMOR_STYLES, STYLE_LABELS, STYLES
 
 log = logging.getLogger("captioner.pipeline")
 
@@ -39,7 +44,7 @@ def process_clip(
     keep_work: bool = False,
     run_judge: bool | None = None,
 ) -> dict[str, Any]:
-    """Process one clip end-to-end. Never raises for content problems — returns a
+    """Process one clip end-to-end. Never raises for content problems -- returns a
     result dict with an `error` field instead so a batch never dies on one clip."""
     result: dict[str, Any] = {
         "file": video_path.name,
@@ -66,22 +71,24 @@ def process_clip(
         transcript = asr_mod.transcribe(pre.audio_path, cfg.asr, client)
         result["language"] = transcript.get("language")
 
-        # --- Stage A: understanding (cached) ---
+        # --- Stage A: fact sheet (cached) ---
         gt = understand_mod.understand(
             pre, transcript, cfg.understand, client, cache=cache, vhash=vhash
         )
         result["ground_truth"] = gt
 
-        # --- Stage B: styles ---
-        captions = styles_mod.generate(gt, cfg.style, client)
+        # --- Stage 3: comedy material (cached) ---
+        comedy = comedy_mod.extract_comedy(
+            gt, cfg.comedy, cfg.style, client, cache=cache, vhash=vhash
+        )
+        result["comedy_material"] = comedy.get("material", [])
 
-        # --- Self-critique loop ---
+        # --- Stages 4 + 5: best-of-N generate -> judge-select ---
         do_judge = cfg.critique.enabled if run_judge is None else run_judge
-        if do_judge:
-            captions, judged = _critique_loop(gt, captions, cfg, client)
-            result["judge"] = judged
-
+        captions, selection = _best_of_n(gt, comedy.get("text", ""), cfg, client, do_judge)
         result["captions"] = captions
+        if selection:
+            result["selection"] = selection
         return result
 
     except Exception as e:  # unexpected: log, keep batch alive
@@ -93,43 +100,94 @@ def process_clip(
             shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _critique_loop(
+def _leaks_tech(style_key: str, caption: str) -> bool:
+    """True if a humorous_non_tech caption contains banned tech vocabulary."""
+    if style_key != "humorous_non_tech" or not caption:
+        return False
+    _, clean = styles_mod.sanitize_non_tech(caption)
+    return not clean
+
+
+def _first_clean(style_key: str, cands: list[str]) -> str:
+    """First candidate that passes the non-tech guard (else the first)."""
+    if not cands:
+        return ""
+    if style_key == "humorous_non_tech":
+        return next((c for c in cands if not _leaks_tech(style_key, c)), cands[0])
+    return cands[0]
+
+
+def _sel_quality(sel: dict[str, Any], style_key: str) -> tuple:
+    """Rank a selection so we can keep the BEST across regen rounds: a leaking
+    non-tech caption is worst; then higher min(accuracy,tone), then composite."""
+    leak_penalty = 0 if not _leaks_tech(style_key, sel.get("winner", "")) else -100
+    acc, tone = sel.get("accuracy", 0.0), sel.get("tone", 0.0)
+    composite = acc + tone + 0.5 * (sel.get("distinct", 0.0) + sel.get("fit", 0.0))
+    return (leak_penalty, min(acc, tone), composite)
+
+
+def _best_of_n(
     gt: dict[str, Any],
-    captions: dict[str, str],
+    comedy_text: str,
     cfg: Config,
     client: FireworksClient,
+    do_judge: bool,
 ) -> tuple[dict[str, str], dict[str, Any]]:
-    """Judge, then regenerate any style below threshold (bounded retries)."""
+    """Generate N candidates per style and select a winner. Styles are selected
+    in order so each judge call sees the already-chosen captions and enforces
+    distinctness. Weak winners get bounded regeneration, keeping the best round.
+    Each style is isolated: a failure in one never discards the others."""
     gt_text = styles_mod._gt_to_text(gt)
-    judged = judge_fn(gt_text, captions, cfg.judge, client)
+    captions: dict[str, str] = {}
+    selection: dict[str, Any] = {}
+    others: dict[str, str] = {}   # already-chosen winners, for the distinctness check
 
-    for _ in range(max(0, cfg.critique.max_retries)):
-        to_fix: list[str] = []
-        for s in STYLES:
-            label = STYLE_LABELS[s]
-            sc = judged["scores"].get(label, {})
-            below = min(sc.get("accuracy", 10), sc.get("tone", 10)) < cfg.critique.min_score
-            leak = (s == "humorous_non_tech" and judged.get("nontech_has_tech_words"))
-            blur = (s in ("humorous_tech", "humorous_non_tech") and not judged.get("distinguishable"))
-            if below or leak or blur:
-                to_fix.append(s)
-        if not to_fix:
-            break
+    for style_key in STYLES:
+        label = STYLE_LABELS[style_key]
+        comedy_in = comedy_text if style_key in HUMOR_STYLES else ""
 
-        for s in to_fix:
-            label = STYLE_LABELS[s]
-            critique = judged["scores"].get(label, {}).get("critique", "Improve accuracy and tone.")
-            if s == "humorous_non_tech" and judged.get("nontech_has_tech_words"):
-                critique += " Remove ALL technology vocabulary."
-            if s in ("humorous_tech", "humorous_non_tech") and not judged.get("distinguishable"):
-                critique += " Make it clearly distinct from the other humorous style."
-            try:
-                new_cap = styles_mod.regenerate_one(gt, s, critique, cfg.style, client)
-                if new_cap:
-                    captions[label] = new_cap
-            except Exception as e:
-                log.warning("regen failed for %s: %s", s, e)
+        cands = styles_mod.generate_candidates(style_key, gt, comedy_in, cfg.style, client)
 
-        judged = judge_fn(gt_text, captions, cfg.judge, client)
+        if not do_judge:
+            # No judge, but still honor the deterministic non-tech leak guard.
+            winner = _first_clean(style_key, cands)
+            captions[label] = winner
+            others[label] = winner
+            continue
 
-    return captions, judged
+        try:
+            sel = select_best(style_key, gt_text, cands, others, cfg.judge, client, cfg.critique.min_score)
+            best = sel
+            leak = _leaks_tech(style_key, sel["winner"])
+
+            retries = max(0, cfg.critique.max_retries)
+            while (sel["needs_regen"] or leak) and retries > 0:
+                retries -= 1
+                critique = sel["critique"] or "Improve accuracy and tone."
+                if leak:
+                    critique += " Remove ALL technology vocabulary."
+                new_cands = styles_mod.generate_candidates(
+                    style_key, gt, comedy_in, cfg.style, client, critique=critique
+                )
+                if not new_cands:
+                    break
+                sel = select_best(style_key, gt_text, new_cands, others, cfg.judge, client, cfg.critique.min_score)
+                # Keep the best round, so a regen never yields a strictly worse caption.
+                if _sel_quality(sel, style_key) > _sel_quality(best, style_key):
+                    best = sel
+                leak = _leaks_tech(style_key, sel["winner"])
+
+            winner = best["winner"] or _first_clean(style_key, cands)
+            selection[label] = {
+                "accuracy": best["accuracy"], "tone": best["tone"],
+                "distinct": best["distinct"], "fit": best["fit"],
+                "n_candidates": len(cands), "critique": best["critique"],
+            }
+        except Exception as e:  # isolate: one bad style must not zero the others
+            log.warning("style %s selection failed (%s); using first candidate", style_key, e)
+            winner = _first_clean(style_key, cands)
+
+        captions[label] = winner
+        others[label] = winner
+
+    return captions, selection

@@ -133,10 +133,12 @@ def _pick_timestamps(duration: float, scenes: list[float], max_frames: int, ever
         if not deduped or t - deduped[-1] >= 0.5:
             deduped.append(t)
 
+    if max_frames <= 1:
+        return deduped[:1]
     if len(deduped) <= max_frames:
         return deduped
     # Downsample evenly but keep first and last.
-    idxs = [round(i * (len(deduped) - 1) / (max_frames - 1)) for i in range(max_frames)]
+    idxs = [round(i * (len(deduped) - 1) / max(1, max_frames - 1)) for i in range(max_frames)]
     return [deduped[i] for i in sorted(set(idxs))]
 
 

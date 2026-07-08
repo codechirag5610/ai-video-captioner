@@ -1,21 +1,22 @@
-"""Stage B: Style rendering.
+"""Stage 4: Style generation (best-of-N).
 
-Turns the neutral ground truth into four captions in four distinct registers.
-This stage owns the pipeline's TONE score.
+For each of the four styles we generate N candidate captions from the SAME fact
+sheet (never from raw frames) using a per-style "style card" with hand-written
+exemplars and per-style temperature. The judge (Stage 5) then selects the best
+candidate per style. This is the engine: variance across candidates is where the
+good jokes come from; the judge keeps only the ones that land.
 
-Key design choices that win tone points:
-  - All four are generated in ONE structured call so the model can actively
-    DIFFERENTIATE them (esp. tech-humor vs non-tech-humor, which judges check).
-  - Every style is required to reference >=2 concrete clip details, which keeps
-    tone anchored to accuracy.
-  - humorous_non_tech has an explicit BANNED tech-vocabulary list so it cannot
-    blur into humorous_tech.
-  - A single style can be regenerated with judge feedback (self-critique loop).
+Guardrails baked into the prompts:
+  - every caption must reference concrete FACTS (accuracy anchored to tone)
+  - nothing from the fact sheet's `uncertain` list may be used
+  - humorous_non_tech has an explicit banned tech-vocabulary list
+  - formal skips comedic material entirely
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -38,50 +39,64 @@ STYLE_LABELS = {
     "humorous_non_tech": "humorous-non-tech",
 }
 
+# Styles that receive the Stage 3 comedic material (formal stays straight).
+HUMOR_STYLES = {"sarcastic", "humorous_tech", "humorous_non_tech"}
+
 BANNED_TECH_WORDS = [
-    "code", "coding", "deploy", "deployment", "server", "bug", "debug", "commit",
-    "merge", "git", "CI", "CD", "pipeline", "build", "compile", "algorithm", "API",
-    "database", "cloud", "software", "hardware", "app", "AI", "machine learning",
-    "prod", "production", "backend", "frontend", "stack", "CPU", "GPU", "RAM",
-    "null", "exception", "runtime", "refactor", "repo", "prompt", "token", "latency",
+    # Unambiguous tech terms. Homographs with common non-tech senses (bug=insect,
+    # build, stack, commit, merge, cloud, token, prompt) are deliberately EXCLUDED
+    # so the guard never rewrites a correct non-tech caption about an actual bug,
+    # sandcastle build, stack of pancakes, or cloud in the sky.
+    "code", "coding", "deploy", "deployment", "server", "debug",
+    "git", "CI", "CD", "pipeline", "compile", "algorithm", "API",
+    "database", "software", "hardware", "app", "AI", "machine learning",
+    "prod", "backend", "frontend", "CPU", "GPU", "RAM",
+    "null", "exception", "runtime", "refactor", "repo", "latency",
+    "download", "upload", "wifi", "internet", "online", "digital", "algorithmic",
+    # Everyday consumer-tech nouns that actually leak into non-tech captions of
+    # tech/screen clips (the highest-frequency real leaks).
+    "computer", "laptop", "smartphone", "phone", "screen", "keyboard",
+    "email", "glitch", "reboot", "technology", "electronic", "gadget",
 ]
 
-STYLE_SPECS = {
+# Rich style cards: voice + do/don't. Exemplars are appended from FEW_SHOT.
+STYLE_CARDS = {
     "formal": (
-        "FORMAL: Objective, precise, complete sentences in a neutral news-summary "
-        "register. No contractions, no slang, no jokes, no opinion. This caption "
-        "carries the accuracy score, so it must be factually exact. 1-2 sentences."
+        "STYLE: Formal\n"
+        "Voice: neutral, precise, professional; a broadcast description or serious alt-text.\n"
+        "Do: state setting, subject, and key event objectively; consistent tense.\n"
+        "Don't: no humor, no irony, no exclamation marks, no editorializing, no slang, no contractions.\n"
+        "Trap to avoid: leaking mild amusement. This style is judged on being genuinely straight."
     ),
     "sarcastic": (
-        "SARCASTIC: Dry, deadpan wit. Feign being unimpressed or praise the obvious "
-        "as if it were genius; understate the chaos. Sarcastic, NOT mean or cruel, "
-        "and NOT random -- the irony must target actual events in the clip. "
-        "1-2 sentences."
+        "STYLE: Sarcastic\n"
+        "Voice: dry, deadpan, mock-impressed or mock-sympathetic; says the opposite of what it means; understates chaos.\n"
+        "Do: irony with a clear target (the situation or decision), faux praise, flat delivery.\n"
+        "Don't: no 'haha' energy, no puns for their own sake, no meanness toward identity groups.\n"
+        "Trap to avoid: drifting into generic humor -- sarcasm must have an edge and a target."
     ),
     "humorous_tech": (
-        "HUMOROUS-TECH: Genuinely funny using programming / IT / engineering culture "
-        "-- map the clip onto things like deploys, merge conflicts, flaky tests, "
-        "prod incidents, standups, CPU/RAM, null pointers, tech debt. The tech "
-        "metaphor must fit what actually happens. Identifiably techie. 1-2 sentences."
+        "STYLE: Humorous (tech)\n"
+        "Voice: comedy built from a software/engineering metaphor mapped onto the event.\n"
+        "Do: make the tech concept the MECHANISM of the joke (rollback, race condition, load test, "
+        "garbage collection, prod incident, retry loop, edge case, tech debt).\n"
+        "Don't: a generic joke with a random tech word bolted on; jargon so deep only SREs laugh; "
+        "more than one metaphor per caption.\n"
+        "Trap to avoid: becoming non-tech humor wearing the word 'server'."
     ),
     "humorous_non_tech": (
-        "HUMOROUS-NON-TECH: Genuinely funny for a general audience with ZERO "
-        "technology references. Everyday-life humor, relatable exaggeration, absurd "
-        "comparisons. Must contain NO technology/computing vocabulary at all. "
-        "1-2 sentences."
+        "STYLE: Humorous (non-tech)\n"
+        "Voice: warm observational comedy; family-group-chat energy; relatable exaggeration.\n"
+        "Do: mock-drama, universal experiences, playful narration of the payoff.\n"
+        "Don't: NO technology references at all; no dry cutting irony (that is the sarcastic lane); no cruelty.\n"
+        "Trap to avoid: overlapping with sarcastic -- this style is warm and playful, not dry and cutting."
     ),
 }
 
 SYSTEM = (
-    "You are an award-winning caption writer. Given a factual description of a "
-    "short video clip, you write captions in several distinct styles. Rules that "
-    "apply to EVERY style:\n"
-    "  1. Each caption must clearly reference at least TWO specific things that "
-    "actually happen in the clip (do not be generic).\n"
-    "  2. Never invent facts that are not in the description.\n"
-    "  3. Keep each caption to 1-2 sentences, punchy and self-contained.\n"
-    "  4. The four styles must read as clearly different from one another; in "
-    "particular, humorous-tech and humorous-non-tech must be unmistakably distinct."
+    "You are an award-winning short-video caption writer. You write captions in a "
+    "specified style, grounded strictly in a factual account of the clip. You never "
+    "invent details, and you make each style unmistakably distinct from the others."
 )
 
 
@@ -104,102 +119,126 @@ def _gt_to_text(gt: dict[str, Any]) -> str:
         lines.append(f"Mood: {gt['mood']}")
     if gt.get("notable"):
         lines.append(f"Most notable thing: {gt['notable']}")
+    if gt.get("uncertain"):
+        lines.append(
+            "UNCERTAIN — do NOT reference or joke about any of these (they may be wrong): "
+            + "; ".join(gt["uncertain"])
+        )
     conf = gt.get("confidence", 1.0)
     if conf < 0.5:
         lines.append(
-            f"(NOTE: analysis confidence is low ({conf:.2f}). Only reference details "
-            "you are given; do NOT invent specifics to be funny.)"
+            f"(NOTE: analysis confidence is low ({conf:.2f}). Reference only the details "
+            "given above; do NOT invent specifics to be funny.)"
         )
     return "\n".join(lines)
 
 
-def _few_shot_block() -> str:
-    """Compact few-shot demonstrations covering all four styles."""
-    blocks = []
-    n_examples = len(next(iter(FEW_SHOT.values())))
-    for i in range(n_examples):
-        gt = FEW_SHOT["formal"][i][0]
-        out = {STYLE_LABELS[s]: FEW_SHOT[s][i][1] for s in STYLES}
-        blocks.append(
-            f"EXAMPLE {i+1}\nCLIP DESCRIPTION: {gt}\nCAPTIONS:\n"
-            + json.dumps(out, ensure_ascii=False, indent=2)
-        )
-    return "\n\n".join(blocks)
+def _style_temperature(style_key: str, spec: ModelSpec) -> float:
+    return spec.temperature_formal if style_key == "formal" else spec.temperature_humor
 
 
-def _build_prompt(gt: dict[str, Any]) -> list[dict[str, Any]]:
-    spec_lines = "\n".join(f"- {STYLE_SPECS[s]}" for s in STYLES)
-    banned = ", ".join(BANNED_TECH_WORDS)
-    label_keys = ", ".join(f'"{STYLE_LABELS[s]}"' for s in STYLES)
-    user = (
-        "Write one caption for the clip below in EACH of these four styles:\n"
-        f"{spec_lines}\n\n"
-        f"For humorous-non-tech, these words (and anything like them) are BANNED: {banned}.\n\n"
-        "Here are worked examples of the four styles:\n\n"
-        f"{_few_shot_block()}\n\n"
-        "Now do the same for THIS clip.\n\n"
-        f"CLIP DESCRIPTION:\n{_gt_to_text(gt)}\n\n"
-        f"Return ONLY a JSON object with exactly these keys: {label_keys}. "
-        "Each value is the caption string."
-    )
+def _card_with_examples(style_key: str) -> str:
+    card = STYLE_CARDS[style_key]
+    examples = FEW_SHOT.get(style_key, [])
+    if examples:
+        ex_lines = "\n".join(f'- "{cap}"' for _, cap in examples)
+        card += f"\nExamples of this style (unrelated videos):\n{ex_lines}"
+    return card
+
+
+def _build_style_prompt(
+    style_key: str, gt: dict[str, Any], comedy_text: str, n: int, critique: str = ""
+) -> list[dict[str, Any]]:
+    parts = [
+        f"Write {n} candidate captions for a short video, in the style defined below. "
+        "Each candidate must take a DIFFERENT angle.",
+        f"\nFACTS (the only things you may reference):\n{_gt_to_text(gt)}",
+    ]
+    if style_key in HUMOR_STYLES and comedy_text:
+        parts.append(f"\nCOMEDIC MATERIAL (pre-approved, grounded angles):\n{comedy_text}")
+    parts.append(f"\nSTYLE CARD:\n{_card_with_examples(style_key)}")
+
+    rules = [
+        "1-2 sentences per caption; punchy and self-contained.",
+        "Every claim must be supported by FACTS above. No invented details.",
+        "Do not reference anything listed under UNCERTAIN.",
+        "Reference at least two concrete things from the clip.",
+    ]
+    if style_key == "humorous_non_tech":
+        rules.append(f"Use NO technology vocabulary at all. Banned words: {', '.join(BANNED_TECH_WORDS)}.")
+    parts.append("\nRules:\n- " + "\n- ".join(rules))
+
+    if critique:
+        parts.append(f"\nThe previous attempt failed judging. Fix exactly this: {critique}")
+
+    parts.append(f'\nReturn ONLY JSON: {{"candidates": ["<caption 1>", ...]}} with {n} strings.')
     return [
         {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": user},
+        {"role": "user", "content": "\n".join(parts)},
     ]
 
 
-def _sanitize_non_tech(caption: str) -> tuple[str, bool]:
-    """Detect banned tech words in the non-tech caption. Returns (caption, clean)."""
-    low = caption.lower()
-    for w in BANNED_TECH_WORDS:
-        # word-ish boundary check
-        token = w.lower()
-        if token in low:
-            # avoid false positives like "cloud" in "clouds"? keep simple substring;
-            # the regen loop will fix real leaks.
-            import re
-            if re.search(rf"\b{re.escape(token)}\b", low):
-                return caption, False
-    return caption, True
+def _parse_candidates(raw: dict[str, Any], n: int) -> list[str]:
+    cands = raw.get("candidates")
+    if isinstance(cands, str):
+        cands = [cands]
+    if not isinstance(cands, list):
+        # Some models return {"1": "...", "2": "..."} or a bare list under another key.
+        vals = [v for v in raw.values() if isinstance(v, str)]
+        cands = vals or []
+    out = [str(c).strip() for c in cands if str(c).strip()]
+    return out[:n] if out else out
 
 
-def generate(gt: dict[str, Any], spec: ModelSpec, client: FireworksClient) -> dict[str, str]:
-    """Generate all four captions. Returns dict keyed by hyphenated style labels."""
-    messages = _build_prompt(gt)
-    raw = client.chat_json(spec, messages)
-
-    out: dict[str, str] = {}
-    for s in STYLES:
-        label = STYLE_LABELS[s]
-        val = raw.get(label) or raw.get(s) or ""
-        out[label] = str(val).strip()
-
-    # Flag non-tech leakage for the critique loop (don't hard-fail here).
-    _, clean = _sanitize_non_tech(out[STYLE_LABELS["humorous_non_tech"]])
-    if not clean:
-        log.debug("non-tech caption contains banned tech vocabulary; critique loop should fix")
-    return out
-
-
-def regenerate_one(
-    gt: dict[str, Any],
+def generate_candidates(
     style_key: str,
-    critique: str,
+    gt: dict[str, Any],
+    comedy_text: str,
     spec: ModelSpec,
     client: FireworksClient,
-) -> str:
-    """Regenerate a single style given judge feedback (self-critique loop)."""
-    label = STYLE_LABELS[style_key]
-    extra = ""
-    if style_key == "humorous_non_tech":
-        extra = f"\nBANNED words (do not use): {', '.join(BANNED_TECH_WORDS)}."
-    user = (
-        f"Rewrite ONLY the {label} caption for this clip. Style rules:\n"
-        f"{STYLE_SPECS[style_key]}{extra}\n\n"
-        f"Problem with the previous attempt: {critique}\n\n"
-        f"CLIP DESCRIPTION:\n{_gt_to_text(gt)}\n\n"
-        f'Return ONLY JSON: {{"{label}": "<the caption>"}}'
-    )
-    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
-    raw = client.chat_json(spec, messages)
-    return str(raw.get(label) or raw.get(style_key) or "").strip()
+    n: int | None = None,
+    critique: str = "",
+) -> list[str]:
+    """Generate N candidate captions for one style."""
+    n = n or spec.n_candidates
+    messages = _build_style_prompt(style_key, gt, comedy_text, n, critique=critique)
+    temp = _style_temperature(style_key, spec)
+    try:
+        raw = client.chat_json(spec, messages, temperature=temp)
+        cands = _parse_candidates(raw, n)
+    except Exception as e:
+        log.warning("candidate generation failed for %s: %s", style_key, e)
+        cands = []
+    return cands
+
+
+# Stems that are unambiguously technical even as a prefix, so we can match any
+# inflection greedily (deploy->deployed/deploying, debug->debugging) with zero
+# risk of flagging ordinary English. Every OTHER banned word matches EXACTLY, so
+# ambiguous roots never fire falsely: "build"!->"building", "commit"!->"commitment",
+# "cloud"!->"clouds", "app"!->"apple", "RAM"!->"ramp".
+_SAFE_INFLECT_STEMS = [
+    "deploy", "server", "debug", "compile", "upload", "download", "refactor",
+]
+
+
+def _banned_pattern() -> re.Pattern:
+    """One regex over all banned words: greedy inflection for the safe stems,
+    exact match for everything else."""
+    parts = []
+    for w in BANNED_TECH_WORDS:
+        esc = re.escape(w.lower())
+        if w.lower() in _SAFE_INFLECT_STEMS:
+            parts.append(rf"{esc}\w*")
+        else:
+            parts.append(esc)
+    return re.compile(rf"\b(?:{'|'.join(parts)})\b", re.IGNORECASE)
+
+
+_BANNED_RE = _banned_pattern()
+
+
+def sanitize_non_tech(caption: str) -> tuple[str, bool]:
+    """Detect banned tech words (and common inflections) in a non-tech caption.
+    Returns (caption, clean)."""
+    return caption, _BANNED_RE.search(caption) is None

@@ -28,15 +28,28 @@ understand:
   temperature: 0.2        # low = factual
   max_tokens: 1500
 
+# --- STAGE 3: Comedy-material extraction (text) ------------------------------
+# Cheap LLM pass over the fact sheet: lists the inherently absurd/ironic elements
+# and their tech-angle, so humor styles aim at grounded, pre-validated material
+# instead of free-associating (which is where hallucination creeps in).
+# Reuses the style model unless `model` is set. Skipped for the formal style.
+comedy:
+  enabled: true
+  model: ""               # empty => use the style model below
+  temperature: 0.7
+
 # --- STAGE B: Style rendering (text) -----------------------------------------
-# Turns the ground-truth into 4 styled captions. Tone engine.
-# Set model to a Gemma text model to maximize Gemma-prize eligibility, e.g.
-#   accounts/fireworks/models/gemma-3-27b-it
+# Turns the ground-truth into 4 styled captions via best-of-N + judge selection.
+# Tone engine. Set model to a Gemma text model to maximize Gemma-prize
+# eligibility, e.g. accounts/fireworks/models/gemma-3-27b-it
 style:
   model: accounts/fireworks/models/gemma-3-27b-it            # PLACEHOLDER - swap launch day
   supports_vision: false
-  temperature: 0.85       # higher = more creative for humor/sarcasm
-  max_tokens: 400
+  temperature: 0.85       # fallback temp if the per-style temps below are unused
+  max_tokens: 700         # room for N numbered candidates in one call
+  n_candidates: 4         # best-of-N: candidates generated per style
+  temperature_formal: 0.3 # formal wants precision, low variance
+  temperature_humor: 0.9  # humor/sarcasm want variance -> better jokes
 
 # --- JUDGE: local eval (should differ from generator to avoid self-bias) -----
 judge:

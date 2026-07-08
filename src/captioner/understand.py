@@ -23,7 +23,7 @@ log = logging.getLogger("captioner.understand")
 # Ground-truth JSON contract. Every field is required (may be empty string/list).
 GROUND_TRUTH_KEYS = [
     "setting", "subjects", "events", "dialogue_summary", "visible_text",
-    "audio_description", "mood", "notable", "confidence",
+    "audio_description", "mood", "notable", "uncertain", "confidence",
 ]
 
 SYSTEM = (
@@ -45,6 +45,7 @@ INSTRUCTIONS = """From the frames and transcript, produce a JSON object with EXA
 - "audio_description": (string) non-speech audio: music mood, sound effects, silence. Do NOT transcribe song lyrics; describe the music instead.
 - "mood": (string) the overall tone/emotion of the clip (e.g. tense, playful, chaotic, wholesome).
 - "notable": (string) the single most surprising, funny, ironic, or attention-grabbing thing about the clip -- the "point" of it.
+- "uncertain": (array of strings) anything you CANNOT verify from the frames/audio -- guesses, ambiguous objects, unclear actions, unreadable text. Be honest here. Do NOT let anything in this list appear as a fact in the fields above. This list is what stops later stages from joking about details that might be wrong.
 - "confidence": (number 0-1) how confident you are that the above is accurate given the available frames/audio. Lower it when frames are dark, blurry, few, or ambiguous.
 
 Return ONLY the JSON object, no prose."""
@@ -96,7 +97,7 @@ def _normalize(gt: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k in GROUND_TRUTH_KEYS:
         v = gt.get(k)
-        if k == "subjects" or k == "events":
+        if k in ("subjects", "events", "uncertain"):
             if isinstance(v, str):
                 v = [v] if v.strip() else []
             out[k] = [str(x) for x in (v or [])]
@@ -108,6 +109,20 @@ def _normalize(gt: dict[str, Any]) -> dict[str, Any]:
         else:
             out[k] = str(v).strip() if v is not None else ""
     return out
+
+
+def _degraded_gt(transcript: dict[str, Any], reason: str) -> dict[str, Any]:
+    """A minimal, transcript-only fact sheet used when frames are missing OR the
+    vision call fails/can't be parsed. Keeps captions non-empty and honest rather
+    than zeroing all four styles on one bad Stage-A call."""
+    text = (transcript.get("text") or "").strip()
+    return _normalize({
+        "setting": "unknown", "mood": "unknown", "confidence": 0.1,
+        "audio_description": text,
+        "dialogue_summary": text,
+        "notable": reason,
+        "uncertain": ["Visual details unavailable — caption only what the transcript supports."],
+    })
 
 
 def understand(
@@ -125,19 +140,23 @@ def understand(
             log.info("Stage A cache hit for %s", pre.video_path.name)
             return hit
 
+    degraded = False
     if not pre.frames:
         log.warning("no frames for %s; producing degraded ground truth", pre.video_path.name)
-        gt = _normalize({
-            "setting": "unknown", "mood": "unknown", "confidence": 0.1,
-            "audio_description": transcript.get("text", ""),
-            "dialogue_summary": transcript.get("text", ""),
-            "notable": "Could not extract frames from this clip.",
-        })
+        gt = _degraded_gt(transcript, "Could not extract frames from this clip.")
+        degraded = True
     else:
-        messages = build_messages(pre, transcript, spec)
-        raw = client.chat_json(spec, messages)
-        gt = _normalize(raw)
+        try:
+            messages = build_messages(pre, transcript, spec)
+            raw = client.chat_json(spec, messages)
+            gt = _normalize(raw)
+        except Exception as e:
+            log.warning("Stage A vision call failed for %s (%s); using transcript-only fallback",
+                        pre.video_path.name, e)
+            gt = _degraded_gt(transcript, "Visual analysis failed; based on audio/transcript only.")
+            degraded = True
 
-    if cache and vhash:
+    # Never cache a degraded result -- a transient failure must not poison the cache.
+    if cache and vhash and not degraded:
         cache.put(vhash, "understand", sig, gt)
     return gt

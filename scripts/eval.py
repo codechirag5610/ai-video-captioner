@@ -1,8 +1,9 @@
-"""Offline eval loop: generate -> judge -> aggregate.
+"""Offline eval loop: generate -> judge-select -> score sheet.
 
 Run over your own diverse test clips to iterate on prompts BEFORE the real judge
-sees you. Prints per-style average accuracy/tone and flags weak clips so you know
-exactly which prompt to tune next.
+sees you. Prints a per-clip x per-style grid of accuracy/tone (the "score sheet"
+from the playbook) so you can see exactly which cells are weak and which prompt
+to tune next.
 
     python scripts/eval.py --input ./clips --out output/eval.json
 
@@ -45,33 +46,52 @@ def main() -> int:
         print(f"No clips found under {args.input}")
         return 1
 
-    per_style = {STYLE_LABELS[s]: {"acc": [], "tone": []} for s in STYLES}
+    labels = [STYLE_LABELS[s] for s in STYLES]
+    per_style = {lbl: {"acc": [], "tone": []} for lbl in labels}
+    grid_rows = []   # (clip, {label: (acc, tone)})
     weak = []
     rows = []
 
     for clip in clips:
         res = process_clip(clip, cfg, client, cache, run_judge=True)
         if res.get("error"):
-            print(f"  ✗ {clip.name}: {res['error']}")
+            print(f"  x {clip.name}: {res['error']}")
             continue
-        judged = res.get("judge") or {}
-        scores = judged.get("scores", {})
-        for label, sc in scores.items():
-            if label in per_style:
-                per_style[label]["acc"].append(sc.get("accuracy", 0))
-                per_style[label]["tone"].append(sc.get("tone", 0))
-        overall = judged.get("overall", 0)
-        print(f"  ✓ {clip.name}: overall={overall}  distinguishable={judged.get('distinguishable')}")
-        if overall < cfg.critique.min_score:
-            weak.append({"file": clip.name, "overall": overall, "captions": res["captions"], "judge": judged})
+        sel = res.get("selection", {})
+        cell = {}
+        clip_scores = []
+        for lbl in labels:
+            s = sel.get(lbl, {})
+            acc, tone = s.get("accuracy", 0), s.get("tone", 0)
+            per_style[lbl]["acc"].append(acc)
+            per_style[lbl]["tone"].append(tone)
+            cell[lbl] = (acc, tone)
+            clip_scores.append(min(acc, tone))
+        grid_rows.append((clip.name, cell))
+        worst = min(clip_scores) if clip_scores else 0
+        print(f"  ok {clip.name}: worst-cell={worst}")
+        if worst < cfg.critique.min_score:
+            weak.append({"file": clip.name, "worst": worst, "captions": res["captions"], "selection": sel})
         rows.append(res)
 
     def avg(xs):
         return round(sum(xs) / len(xs), 2) if xs else 0.0
 
-    print("\n=== AVERAGE SCORES BY STYLE ===")
-    for label, d in per_style.items():
-        print(f"  {label:20s}  accuracy={avg(d['acc']):5}  tone={avg(d['tone']):5}")
+    # Score-sheet grid: rows = clips, cols = styles, cell = "acc/tone".
+    print("\n=== SCORE SHEET (accuracy/tone) ===")
+    header = "clip".ljust(28) + "".join(l[:12].ljust(14) for l in labels)
+    print(header)
+    for name, cell in grid_rows:
+        line = name[:27].ljust(28)
+        for lbl in labels:
+            a, t = cell[lbl]
+            line += f"{a:.0f}/{t:.0f}".ljust(14)
+        print(line)
+    print("-" * len(header))
+    avg_line = "AVG".ljust(28)
+    for lbl in labels:
+        avg_line += f"{avg(per_style[lbl]['acc']):.1f}/{avg(per_style[lbl]['tone']):.1f}".ljust(14)
+    print(avg_line)
 
     summary = {
         "n_clips": len(rows),

@@ -29,6 +29,10 @@ class ModelSpec:
     image_quality: int = 85
     temperature: float = 0.7
     max_tokens: int = 1024
+    # Best-of-N knobs (only meaningful for the style model).
+    n_candidates: int = 4              # candidates generated per style
+    temperature_formal: float = 0.3    # low temp: formal wants precision
+    temperature_humor: float = 0.9     # high temp: humor/sarcasm want variance
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ModelSpec":
@@ -60,6 +64,15 @@ class CritiqueConfig:
 
 
 @dataclass
+class ComedyConfig:
+    """Stage 3: comedy-material extraction. Reuses the style model unless a
+    separate `model` is given in config."""
+    enabled: bool = True
+    model: str = ""          # empty => use the style model
+    temperature: float = 0.7
+
+
+@dataclass
 class Config:
     api: ApiConfig
     understand: ModelSpec
@@ -67,6 +80,7 @@ class Config:
     judge: ModelSpec
     asr: AsrConfig
     critique: CritiqueConfig
+    comedy: ComedyConfig
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -103,5 +117,6 @@ class Config:
             judge=ModelSpec.from_dict(raw["judge"]),
             asr=AsrConfig(**{k: v for k, v in raw.get("asr", {}).items() if k in AsrConfig.__dataclass_fields__}),
             critique=CritiqueConfig(**{k: v for k, v in raw.get("critique", {}).items() if k in CritiqueConfig.__dataclass_fields__}),
+            comedy=ComedyConfig(**{k: v for k, v in raw.get("comedy", {}).items() if k in ComedyConfig.__dataclass_fields__}),
             raw=raw,
         )

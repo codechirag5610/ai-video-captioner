@@ -30,6 +30,15 @@ try:
 except Exception:  # pragma: no cover - defensive against SDK version drift
     _RETRYABLE = (Exception,)
 
+# json_mode fallback should fire ONLY when json_mode itself is the problem
+# (model rejects response_format -> 400) or the output can't be parsed. Retryable
+# errors are already handled by tenacity in chat(); don't double-retry them.
+try:
+    from openai import BadRequestError
+    _JSON_FALLBACK = (BadRequestError, ValueError)  # JSONDecodeError subclasses ValueError
+except Exception:  # pragma: no cover
+    _JSON_FALLBACK = (ValueError,)
+
 
 class FireworksClient:
     def __init__(self, api: ApiConfig):
@@ -95,7 +104,7 @@ class FireworksClient:
         try:
             text = self.chat(spec, messages, json_mode=True, **kwargs)
             return _parse_json(text)
-        except Exception as e:  # json_mode unsupported OR parse failure -> retry plain
+        except _JSON_FALLBACK as e:  # json_mode unsupported OR parse failure -> retry plain
             log.debug("json_mode path failed (%s); retrying without response_format", e)
             text = self.chat(spec, messages, json_mode=False, **kwargs)
             return _parse_json(text)
