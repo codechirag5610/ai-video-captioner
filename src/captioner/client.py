@@ -45,6 +45,37 @@ except Exception:  # pragma: no cover
 RUN_EVENTS: list[dict[str, Any]] = []
 
 
+class _Pacer:
+    """Spaces calls per (provider, model) to stay under free-tier RPM limits.
+    Gemma on the Gemini free tier allows 15 requests/min per model; bursting
+    past it buys a 429 with a ~55s retry delay, which means a fallback. A 4.6s
+    minimum spacing (~13 RPM) keeps every call on Gemma."""
+
+    def __init__(self, spacing_s: float = 4.6):
+        import threading as _t
+
+        self.spacing = spacing_s
+        self._lock = _t.Lock()
+        self._next: dict[str, float] = {}
+
+    def wait(self, key: str) -> None:
+        import time as _time
+
+        while True:
+            with self._lock:
+                now = _time.monotonic()
+                slot = max(self._next.get(key, 0.0), now)
+                self._next[key] = slot + self.spacing
+            delay = slot - now
+            if delay <= 0:
+                return
+            _time.sleep(delay)
+            return
+
+
+_GEMINI_PACER = _Pacer()
+
+
 class FireworksClient:
     def __init__(self, api: ApiConfig):
         self.api = api
@@ -112,6 +143,16 @@ class FireworksClient:
     def _chat_once(self, spec, route, messages, timeout_s, *, json_mode, temperature, max_tokens):
         model = route.model if route is not None else spec.model
         client = self._client_for(route, timeout_s) if route is not None else self._chat
+        provider = getattr(route, "provider", "") if route is not None else ""
+        extra_body = dict(spec.extra_body or {})
+        eff_max = spec.max_tokens if max_tokens is None else max_tokens
+        if provider == "gemini":
+            # Gemma 4 rejects thinking-budget controls outright (400) and ALWAYS
+            # prepends <thought> blocks that consume the completion budget: drop
+            # the param and give the thought room, then strip it on the way out.
+            extra_body.pop("reasoning_effort", None)
+            eff_max = max(int(eff_max * 2), eff_max + 1200)
+            _GEMINI_PACER.wait(model)  # free tier: 15 RPM per model
 
         @retry(
             reraise=True,
@@ -128,17 +169,23 @@ class FireworksClient:
                 model=model,
                 messages=messages,
                 temperature=spec.temperature if temperature is None else temperature,
-                max_tokens=spec.max_tokens if max_tokens is None else max_tokens,
+                max_tokens=eff_max,
                 timeout=timeout_s,
             )
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
-            if spec.extra_body:
+            if extra_body:
                 # provider-specific body params, e.g. {"reasoning_effort": "none"}
-                kwargs["extra_body"] = spec.extra_body
+                kwargs["extra_body"] = extra_body
             resp = client.chat.completions.create(**kwargs)
             choice = resp.choices[0]
-            return choice.message.content or "", (choice.finish_reason or "")
+            text = strip_thoughts(choice.message.content or "")
+            if not text.strip():
+                # The whole budget went to a (possibly truncated) thought block:
+                # that is a failed call, not an empty answer. Let the route chain
+                # or retry handle it.
+                raise ValueError("empty answer after stripping thought blocks")
+            return text, (choice.finish_reason or "")
 
         return _call()
 
@@ -188,9 +235,18 @@ class FireworksClient:
         return _call()
 
 
+_THOUGHT_RE = re.compile(r"(?s)<(thought|think)>.*?(</\1>|\Z)")
+
+
+def strip_thoughts(text: str) -> str:
+    """Remove <thought>/<think> reasoning blocks (closed or truncated) that
+    thinking models emit inside content."""
+    return _THOUGHT_RE.sub("", text).strip()
+
+
 def _parse_json(text: str) -> dict[str, Any]:
     """Robustly pull a JSON object out of a model response."""
-    text = text.strip()
+    text = strip_thoughts(text.strip())
     # strip ```json ... ``` fences if present
     fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
     if fence:

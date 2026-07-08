@@ -224,7 +224,7 @@ def generate_candidates(
 
 _WRAP_QUOTES = re.compile(r'^\s*["\'“‘](.*)["\'”’]\s*$', re.DOTALL)
 _PREFIX = re.compile(r"(?i)^\s*(?:caption|answer|formal|sarcastic|humorous[_ -]?(?:non[_ -]?)?tech)\s*[:\-]\s*")
-_THINK = re.compile(r"(?s)<think>.*?</think>\s*")
+_THINK = re.compile(r"(?s)<(?:think|thought)>.*?(?:</(?:think|thought)>|\Z)\s*")
 
 
 def finalize(style_key: str, caption: str) -> str:

@@ -31,7 +31,7 @@ providers:
 understand:
   model: gemma-4-26b-a4b-it
   provider: gemini
-  timeout_s: 30
+  timeout_s: 45   # thinking models: thought tokens add latency
   fallbacks:
     - { model: "google/gemma-4-26b-a4b-it", provider: openrouter }
     - { model: "accounts/fireworks/models/kimi-k2p6", provider: "" }
@@ -56,7 +56,7 @@ comedy:
 style:
   model: gemma-4-31b-it
   provider: gemini
-  timeout_s: 15
+  timeout_s: 60   # thinking generations run long
   fallbacks:
     - { model: "google/gemma-4-31b-it", provider: openrouter }
     - { model: "accounts/fireworks/models/kimi-k2p6", provider: "" }
