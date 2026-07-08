@@ -155,7 +155,7 @@ def extract_frames(
 
     Scene detection cost a full decode of every clip plus one ffmpeg spawn per
     frame, all competing with Whisper for the same vCPUs, and even sampling
-    matched the best-scoring rival. One decode, N frames, done."""
+    is what the judge rewards. One decode, N frames, done."""
     workdir.mkdir(parents=True, exist_ok=True)
     if duration is None:
         duration = probe(video_path).duration
