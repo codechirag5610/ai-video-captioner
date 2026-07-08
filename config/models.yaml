@@ -66,10 +66,14 @@ judge:
 
 # --- ASR: audio transcription ------------------------------------------------
 asr:
-  backend: none           # fireworks | local | none  (Whisper not provisioned on this account -> 403)
-  model: whisper-v3       # fireworks audio model id (unused while backend=none)
-  # local backend uses faster-whisper; set size below if backend=local
-  local_model_size: base
+  # local = faster-whisper (offline, bundled). This account's key is NOT entitled
+  # to the Fireworks audio product (401), so local is the working path.
+  backend: local          # local | fireworks | none
+  model: whisper-v3       # fireworks audio model id (only used if backend=fireworks)
+  # faster-whisper size: tiny|base|small|medium|large-v3|distil-large-v3.
+  # small = fast + solid multilingual. Bump to large-v3 for max accuracy on hard
+  # audio, or distil-large-v3 for near-large quality on English-heavy sets.
+  local_model_size: small
 
 # --- Self-critique regeneration loop (optional, costs credits) ---------------
 critique:

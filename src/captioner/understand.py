@@ -9,6 +9,7 @@ material Stage B turns into humor and sarcasm, so tone stays anchored to facts.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -51,8 +52,11 @@ INSTRUCTIONS = """From the frames and transcript, produce a JSON object with EXA
 Return ONLY the JSON object, no prose."""
 
 
-def _sampling_signature(spec: ModelSpec, n_frames: int) -> str:
-    return f"{spec.model}|imgs={n_frames}|edge={spec.image_max_edge}|q={spec.image_quality}"
+def _sampling_signature(spec: ModelSpec, n_frames: int, transcript_text: str = "") -> str:
+    # Include a transcript fingerprint: the transcript is part of Stage A's input,
+    # so a new/changed transcript (e.g. ASR turned on) must invalidate the cache.
+    th = hashlib.sha256(transcript_text.encode("utf-8")).hexdigest()[:8]
+    return f"{spec.model}|imgs={n_frames}|edge={spec.image_max_edge}|q={spec.image_quality}|tr={th}"
 
 
 def build_messages(pre: Preprocessed, transcript: dict[str, Any], spec: ModelSpec) -> list[dict[str, Any]]:
@@ -133,7 +137,7 @@ def understand(
     cache: Cache | None = None,
     vhash: str | None = None,
 ) -> dict[str, Any]:
-    sig = _sampling_signature(spec, len(pre.frames))
+    sig = _sampling_signature(spec, len(pre.frames), transcript.get("text", "") or "")
     if cache and vhash:
         hit = cache.get(vhash, "understand", sig)
         if hit:

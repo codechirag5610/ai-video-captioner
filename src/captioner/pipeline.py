@@ -67,8 +67,17 @@ def process_clip(
         result["n_frames"] = len(pre.frames)
         result["has_audio"] = pre.probe.has_audio
 
-        # --- ASR ---
-        transcript = asr_mod.transcribe(pre.audio_path, cfg.asr, client)
+        # --- ASR (cached: transcription is deterministic per clip+model) ---
+        asr_sig = f"{cfg.asr.backend}|{cfg.asr.model}|{cfg.asr.local_model_size}"
+        transcript = cache.get(vhash, "asr", asr_sig)
+        if transcript is None:
+            transcript = asr_mod.transcribe(pre.audio_path, cfg.asr, client)
+            # Cache silence (audio present, no speech) and real transcripts alike,
+            # but not a hard failure on a clip that clearly has audio (so a fixed
+            # setup can re-transcribe). `text` empty + audio present = treat as
+            # cacheable "no speech"; only skip caching when ASR is disabled/no audio.
+            if pre.audio_path is not None or cfg.asr.backend == "none":
+                cache.put(vhash, "asr", asr_sig, transcript)
         result["language"] = transcript.get("language")
 
         # --- Stage A: fact sheet (cached) ---

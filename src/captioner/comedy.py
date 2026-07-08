@@ -11,6 +11,8 @@ Skipped for the formal style downstream.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from dataclasses import replace
 from typing import Any
@@ -92,7 +94,10 @@ def extract_comedy(
         return {"material": [], "text": ""}
 
     spec = style_spec if not cfg.model else replace(style_spec, model=cfg.model)
-    sig = f"{spec.model}|comedy|t={cfg.temperature}"
+    # Fingerprint the fact sheet: comedy is derived from it, so a changed fact
+    # sheet (e.g. after ASR added a transcript) must invalidate this cache too.
+    gt_fp = hashlib.sha256(json.dumps(gt, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:8]
+    sig = f"{spec.model}|comedy|t={cfg.temperature}|gt={gt_fp}"
     if cache and vhash:
         hit = cache.get(vhash, "comedy", sig)
         if hit is not None:

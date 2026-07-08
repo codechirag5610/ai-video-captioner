@@ -12,6 +12,12 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Pre-download the faster-whisper model into the image so runs never stall on a
+# first-use download (and work even if HF Hub is slow/unreachable at runtime).
+# Keep WHISPER_MODEL in sync with asr.local_model_size in config/models.yaml.
+ARG WHISPER_MODEL=small
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='int8')"
+
 # App code.
 COPY pyproject.toml ./
 COPY src/ ./src/

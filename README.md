@@ -75,17 +75,23 @@ style, keep only the one that lands.
 
 ## Setup
 
-Requirements: Python 3.10+, `ffmpeg` (and `ffprobe`) on PATH, a Fireworks API key.
+Requirements: **Python 3.10–3.13** (3.14's `faster-whisper`/`av` wheels aren't
+ready yet), `ffmpeg` (and `ffprobe`) on PATH, a Fireworks API key.
 
 ```bash
 cp .env.example .env         # then paste your FIREWORKS_API_KEY
-pip install -e .             # installs deps + the `captioner` command
+pip install -e .             # installs deps (incl. faster-whisper) + the `captioner` command
 ```
 
 > The package lives under `src/`, so a bare `python -m captioner.cli` only works
 > after `pip install -e .`. If you'd rather not install, run everything with
 > `PYTHONPATH=src python -m captioner.cli ...`. (`pip install -r requirements.txt`
 > installs the runtime deps but **not** the `captioner` entry point.)
+>
+> **Speech recognition runs locally** via `faster-whisper` (no external audio API
+> needed). The first run downloads the Whisper model set by `asr.local_model_size`
+> in the config (default `small`, ~0.5 GB) into the HuggingFace cache; the Docker
+> image pre-bakes it so containers run offline.
 
 ## Usage
 

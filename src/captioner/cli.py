@@ -30,8 +30,9 @@ def _setup_logging(verbose: bool) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
+    # Keep third-party chatter out of our --verbose output.
+    for noisy in ("httpx", "httpcore", "openai", "huggingface_hub", "urllib3", "filelock"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def _find_clips(input_path: Path) -> list[Path]:

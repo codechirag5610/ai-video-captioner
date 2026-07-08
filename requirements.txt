@@ -6,6 +6,7 @@ tenacity>=8.2.0        # retries / exponential backoff for API calls
 pillow>=10.0.0         # frame resize/encode
 tqdm>=4.66.0           # batch progress
 
-# Optional local ASR fallback (only needed if --asr-backend local).
-# Kept out of the default Docker image to stay slim; install on demand.
-# faster-whisper>=1.0.0
+# Speech recognition (primary accuracy signal for spoken clips). Local Whisper
+# via CTranslate2 -- offline, GPU/CPU, no external audio API needed.
+# Requires Python <=3.13 (av/ctranslate2 wheels); 3.14 not yet supported.
+faster-whisper>=1.1.0
