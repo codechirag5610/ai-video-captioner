@@ -27,8 +27,13 @@ COPY config/ ./config/
 ENV PYTHONPATH=/app/src \
     PYTHONUNBUFFERED=1
 
-# Default: read clips from /app/clips, write /app/output/captions.json.
-# Mount your data:  docker run --rm --env-file .env \
-#   -v $PWD/clips:/app/clips -v $PWD/output:/app/output -v $PWD/cache:/app/cache captioner
-ENTRYPOINT ["python", "-m", "captioner.cli"]
-CMD ["--input", "/app/clips", "--output", "/app/output/captions.json"]
+# Track 2 injects NO credentials, so the Fireworks key must be baked at build time:
+#   docker build --build-arg FIREWORKS_API_KEY=fw_... --platform linux/amd64 -t <img> .
+# WARNING: this key becomes readable in the public image (docker inspect / history).
+# Use a spend-capped, rotatable key and rotate it after the event.
+ARG FIREWORKS_API_KEY=""
+ENV FIREWORKS_API_KEY=$FIREWORKS_API_KEY
+
+# Judging-harness entrypoint: reads /input/tasks.json, downloads each video_url,
+# captions it, writes /output/results.json. Override paths with INPUT_PATH/OUTPUT_PATH.
+ENTRYPOINT ["python", "-m", "captioner.harness"]

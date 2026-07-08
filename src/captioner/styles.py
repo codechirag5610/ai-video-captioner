@@ -31,12 +31,14 @@ log = logging.getLogger("captioner.styles")
 
 STYLES = ["formal", "sarcastic", "humorous_tech", "humorous_non_tech"]
 
-# Output labels the hackathon uses (hyphenated). Internal keys use underscores.
+# Output keys MUST match the Track 2 guide exactly (underscores). The guide's
+# output example is {formal, sarcastic, humorous_tech, humorous_non_tech}; a
+# hyphenated key reads as a MISSING style and scores zero for that clip.
 STYLE_LABELS = {
     "formal": "formal",
     "sarcastic": "sarcastic",
-    "humorous_tech": "humorous-tech",
-    "humorous_non_tech": "humorous-non-tech",
+    "humorous_tech": "humorous_tech",
+    "humorous_non_tech": "humorous_non_tech",
 }
 
 # Styles that receive the Stage 3 comedic material (formal stays straight).
