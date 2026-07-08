@@ -64,8 +64,10 @@ def _fact_sheet_text(gt: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_material(material: list[dict[str, Any]]) -> str:
-    """Flatten to a compact block injected into humor style prompts."""
+def _render_material(material: list[dict[str, Any]], include_tech: bool = True) -> str:
+    """Flatten to a compact block injected into humor style prompts. Tech angles
+    are only rendered for humorous_tech: feeding them to humorous_non_tech is
+    actively baiting the jargon the style must never use."""
     out = []
     for i, m in enumerate(material, 1):
         el = str(m.get("element", "")).strip()
@@ -74,7 +76,7 @@ def _render_material(material: list[dict[str, Any]]) -> str:
         if not el:
             continue
         line = f"{i}. {el} — funny because {why}" if why else f"{i}. {el}"
-        if tech:
+        if tech and include_tech:
             line += f" [tech angle: {tech}]"
         out.append(line)
     return "\n".join(out)
@@ -116,7 +118,11 @@ def extract_comedy(
         log.warning("comedy extraction failed (continuing without it): %s", e)
         material = []
 
-    result = {"material": material, "text": _render_material(material)}
+    result = {
+        "material": material,
+        "text": _render_material(material, include_tech=True),
+        "text_no_tech": _render_material(material, include_tech=False),
+    }
     if cache and vhash and material:
         cache.put(vhash, "comedy", sig, result)
     return result

@@ -122,15 +122,18 @@ def _gt_to_text(gt: dict[str, Any]) -> str:
     if gt.get("notable"):
         lines.append(f"Most notable thing: {gt['notable']}")
     if gt.get("uncertain"):
+        # Never enumerate the uncertain items verbatim: naming them plants the
+        # exact nouns we need the writer NOT to use (pink-elephant effect).
         lines.append(
-            "UNCERTAIN — do NOT reference or joke about any of these (they may be wrong): "
-            + "; ".join(gt["uncertain"])
+            "Some details (such as exact on-screen text, brands, names, or counts) "
+            "could not be verified from the footage — do not mention, quote, or "
+            "joke about anything not explicitly listed above."
         )
     conf = gt.get("confidence", 1.0)
     if conf < 0.5:
         lines.append(
-            f"(NOTE: analysis confidence is low ({conf:.2f}). Reference only the details "
-            "given above; do NOT invent specifics to be funny.)"
+            "(NOTE: keep the caption general and grounded; reference only the "
+            "details given above and do NOT invent specifics to be funny.)"
         )
     return "\n".join(lines)
 
@@ -164,10 +167,11 @@ def _build_style_prompt(
     parts.append(f"\nSTYLE CARD:\n{_card_with_examples(style_key)}")
 
     rules = [
-        "1-2 sentences per caption; punchy and self-contained.",
-        "Every claim must be supported by FACTS above. No invented details.",
-        "Do not reference anything listed under UNCERTAIN.",
-        "Reference at least two concrete things from the clip.",
+        "ONE tight, punchy sentence per caption, under ~25 words (two sentences only if truly needed).",
+        "Every claim must be supported by FACTS above. No invented objects, text, brands, or actions.",
+        "Anchor each caption in at least ONE specific, concrete detail from the clip.",
+        "The tone must be unmistakable within the first clause.",
+        "Output plain caption text: no quotes, no markdown, no 'Caption:' prefixes.",
     ]
     if style_key == "humorous_non_tech":
         rules.append(f"Use NO technology vocabulary at all. Banned words: {', '.join(BANNED_TECH_WORDS)}.")
@@ -203,9 +207,10 @@ def generate_candidates(
     client: FireworksClient,
     n: int | None = None,
     critique: str = "",
+    n_override: int | None = None,
 ) -> list[str]:
     """Generate N candidate captions for one style."""
-    n = n or spec.n_candidates
+    n = n_override or n or spec.n_candidates
     messages = _build_style_prompt(style_key, gt, comedy_text, n, critique=critique)
     temp = _style_temperature(style_key, spec)
     try:
@@ -215,6 +220,31 @@ def generate_candidates(
         log.warning("candidate generation failed for %s: %s", style_key, e)
         cands = []
     return cands
+
+
+_WRAP_QUOTES = re.compile(r'^\s*["\'“‘](.*)["\'”’]\s*$', re.DOTALL)
+_PREFIX = re.compile(r"(?i)^\s*(?:caption|answer|formal|sarcastic|humorous[_ -]?(?:non[_ -]?)?tech)\s*[:\-]\s*")
+_THINK = re.compile(r"(?s)<think>.*?</think>\s*")
+
+
+def finalize(style_key: str, caption: str) -> str:
+    """Deterministic cleanup applied to EVERY winner and fallback: strip
+    reasoning blocks, wrapping quotes, label prefixes, markdown fences; collapse
+    whitespace; hard-cap runaway length at the second sentence boundary."""
+    if not caption:
+        return ""
+    text = _THINK.sub("", caption)
+    text = text.replace("```", " ").strip()
+    m = _WRAP_QUOTES.match(text)
+    if m:
+        text = m.group(1).strip()
+    text = _PREFIX.sub("", text)
+    text = " ".join(text.split())
+    # Cap at two sentences: rambles dilute both judge axes.
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+    if len(sentences) > 2:
+        text = " ".join(sentences[:2])
+    return text.strip()
 
 
 # Stems that are unambiguously technical even as a prefix, so we can match any
@@ -227,6 +257,13 @@ _SAFE_INFLECT_STEMS = [
     "computer", "laptop", "smartphone", "phone",  # -> computers, phones, ...
 ]
 
+# Nouns where the plural is exactly as technical as the singular, but a greedy
+# \w* would over-match (screen -> screenplay). Allow only s/es.
+_PLURAL_ONLY_STEMS = [
+    "app", "algorithm", "database", "email", "keyboard", "glitch", "screen",
+    "pixel", "browser", "website", "gadget", "robot",
+]
+
 
 def _banned_pattern() -> re.Pattern:
     """One regex over all banned words: greedy inflection for the safe stems,
@@ -236,6 +273,8 @@ def _banned_pattern() -> re.Pattern:
         esc = re.escape(w.lower())
         if w.lower() in _SAFE_INFLECT_STEMS:
             parts.append(rf"{esc}\w*")
+        elif w.lower() in _PLURAL_ONLY_STEMS:
+            parts.append(rf"{esc}(?:es|s)?")
         else:
             parts.append(esc)
     return re.compile(rf"\b(?:{'|'.join(parts)})\b", re.IGNORECASE)
@@ -246,5 +285,8 @@ _BANNED_RE = _banned_pattern()
 
 def sanitize_non_tech(caption: str) -> tuple[str, bool]:
     """Detect banned tech words (and common inflections) in a non-tech caption.
+    Normalizes separators first so 'A.I.' and 'wi-fi' cannot sneak past.
     Returns (caption, clean)."""
-    return caption, _BANNED_RE.search(caption) is None
+    normalized = re.sub(r"[.\-]", "", caption)
+    hit = _BANNED_RE.search(caption) or _BANNED_RE.search(normalized)
+    return caption, hit is None

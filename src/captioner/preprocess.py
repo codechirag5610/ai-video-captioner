@@ -148,33 +148,57 @@ def extract_frames(
     *,
     max_frames: int = 16,
     every_s: float = 4.0,
-    scene_threshold: float = 0.3,
+    scene_threshold: float = 0.3,  # kept for API compat; scene detect is off
     duration: float | None = None,
 ) -> list[Frame]:
-    """Adaptive sampling: scene-change beats + uniform fallback."""
+    """Uniform sampling in a single ffmpeg pass.
+
+    Scene detection cost a full decode of every clip plus one ffmpeg spawn per
+    frame, all competing with Whisper for the same vCPUs, and even sampling
+    matched the best-scoring rival. One decode, N frames, done."""
     workdir.mkdir(parents=True, exist_ok=True)
     if duration is None:
         duration = probe(video_path).duration
 
-    scenes = _scene_timestamps(video_path, scene_threshold)
-    scene_set = set(scenes)
-    timestamps = _pick_timestamps(duration, scenes, max_frames, every_s)
+    timestamps = _pick_timestamps(duration, [], max_frames, every_s)
 
     frames: list[Frame] = []
-    for i, t in enumerate(timestamps):
-        out = workdir / f"frame_{i:03d}_{t:07.2f}.jpg"
+    if timestamps:
+        # Single pass: select frames nearest each target timestamp.
+        exprs = "+".join(
+            f"lt(prev_pts*TB\\,{t:.3f})*gte(pts*TB\\,{t:.3f})" for t in timestamps
+        )
+        pattern = workdir / "frame_%03d.jpg"
         try:
-            # -ss before -i = fast input seek; accurate enough for short clips.
             _run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-ss", f"{t:.3f}", "-i", str(video_path),
-                "-frames:v", "1", "-q:v", "3", "-y", str(out),
+                "-i", str(video_path),
+                "-vf", f"select='{exprs}'",
+                "-fps_mode", "vfr", "-frames:v", str(len(timestamps)),
+                "-q:v", "3", "-y", str(pattern),
             ])
+            produced = sorted(workdir.glob("frame_*.jpg"))
+            for t, path in zip(timestamps, produced):
+                if path.exists() and path.stat().st_size > 0:
+                    frames.append(Frame(timestamp=t, path=path))
         except RuntimeError as e:
-            log.warning("frame extract failed at t=%.2f: %s", t, e)
-            continue
-        if out.exists() and out.stat().st_size > 0:
-            frames.append(Frame(timestamp=t, path=out, is_scene_change=any(abs(t - s) < 0.6 for s in scene_set)))
+            log.warning("single-pass extract failed (%s); falling back to per-frame seeks", e)
+
+    if not frames:
+        for i, t in enumerate(timestamps):
+            out = workdir / f"seek_{i:03d}_{t:07.2f}.jpg"
+            try:
+                # -ss before -i = fast input seek; accurate enough for short clips.
+                _run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-ss", f"{t:.3f}", "-i", str(video_path),
+                    "-frames:v", "1", "-q:v", "3", "-y", str(out),
+                ])
+            except RuntimeError as e:
+                log.warning("frame extract failed at t=%.2f: %s", t, e)
+                continue
+            if out.exists() and out.stat().st_size > 0:
+                frames.append(Frame(timestamp=t, path=out))
 
     if not frames:
         # Last-resort: grab the very first decodable frame.

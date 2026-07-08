@@ -20,6 +20,16 @@ _DEFAULT_CONFIG = _REPO_ROOT / "config" / "models.yaml"
 
 
 @dataclass
+class Route:
+    """One (model, endpoint, key) a stage can call. Stages hold a primary route
+    plus fallbacks; a route whose key env var is empty is skipped entirely."""
+    model: str
+    base_url: str = ""      # empty => the default Fireworks api.base_url
+    api_key: str = ""       # empty => the Fireworks key
+    provider: str = ""      # informational, for logging (gemini/openrouter/"")
+
+
+@dataclass
 class ModelSpec:
     model: str
     supports_vision: bool = False
@@ -29,6 +39,11 @@ class ModelSpec:
     image_quality: int = 85
     temperature: float = 0.7
     max_tokens: int = 1024
+    timeout_s: int = 0                 # 0 => the api-level default
+    enabled: bool = True               # judge.enabled gates best-of-N selection
+    provider: str = ""                 # name from providers: (empty = Fireworks)
+    fallbacks: list = field(default_factory=list)  # resolved to list[Route] in load()
+    routes: list = field(default_factory=list)     # [primary Route, *fallback Routes]
     # Best-of-N knobs (only meaningful for the style model).
     n_candidates: int = 4              # candidates generated per style
     temperature_formal: float = 0.3    # low temp: formal wants precision
@@ -55,7 +70,7 @@ class ApiConfig:
 
 @dataclass
 class AsrConfig:
-    backend: str = "fireworks"   # fireworks | local | none
+    backend: str = "local"   # local | fireworks | none
     model: str = "whisper-v3"
     local_model_size: str = "base"
 
@@ -104,8 +119,8 @@ class Config:
         api = ApiConfig(
             base_url=os.getenv("FIREWORKS_BASE_URL", api_raw.get("base_url", ApiConfig.base_url)),
             audio_base_url=api_raw.get("audio_base_url", api_raw.get("base_url", ApiConfig.audio_base_url)),
-            timeout_s=api_raw.get("timeout_s", 120),
-            max_retries=api_raw.get("max_retries", 5),
+            timeout_s=api_raw.get("timeout_s", 25),
+            max_retries=api_raw.get("max_retries", 2),
             api_key=os.getenv("FIREWORKS_API_KEY", ""),
         )
         if not api.api_key:
@@ -114,11 +129,46 @@ class Config:
                 "or export FIREWORKS_API_KEY."
             )
 
+        providers = raw.get("providers", {}) or {}
+
+        def resolve_routes(spec: ModelSpec) -> None:
+            """Build spec.routes = [primary, *fallbacks], skipping providers
+            whose API key env var is empty so a missing key costs nothing."""
+            def route_for(model: str, provider_name: str) -> Route | None:
+                if not provider_name:  # Fireworks default
+                    return Route(model=model, base_url="", api_key="", provider="")
+                p = providers.get(provider_name)
+                if not p:
+                    return None
+                key = os.getenv(p.get("api_key_env", ""), "")
+                if not key:
+                    return None
+                return Route(model=model, base_url=p.get("base_url", ""),
+                             api_key=key, provider=provider_name)
+
+            routes = []
+            primary = route_for(spec.model, spec.provider)
+            if primary:
+                routes.append(primary)
+            for fb in spec.fallbacks or []:
+                r = route_for(fb.get("model", ""), fb.get("provider", "") or "")
+                if r and r.model:
+                    routes.append(r)
+            if not routes:  # everything skipped -> plain Fireworks with the spec model
+                routes.append(Route(model=spec.model))
+            spec.routes = routes
+
+        understand = ModelSpec.from_dict(raw["understand"])
+        style = ModelSpec.from_dict(raw["style"])
+        judge = ModelSpec.from_dict(raw["judge"])
+        for spec in (understand, style, judge):
+            resolve_routes(spec)
+
         return cls(
             api=api,
-            understand=ModelSpec.from_dict(raw["understand"]),
-            style=ModelSpec.from_dict(raw["style"]),
-            judge=ModelSpec.from_dict(raw["judge"]),
+            understand=understand,
+            style=style,
+            judge=judge,
             asr=AsrConfig(**{k: v for k, v in raw.get("asr", {}).items() if k in AsrConfig.__dataclass_fields__}),
             critique=CritiqueConfig(**{k: v for k, v in raw.get("critique", {}).items() if k in CritiqueConfig.__dataclass_fields__}),
             comedy=ComedyConfig(**{k: v for k, v in raw.get("comedy", {}).items() if k in ComedyConfig.__dataclass_fields__}),

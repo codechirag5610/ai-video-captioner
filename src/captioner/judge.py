@@ -96,11 +96,14 @@ def select_best(
     try:
         raw = client.chat_json(spec, messages, temperature=0.0)
     except Exception as e:
-        log.warning("judge call failed for %s; falling back to first candidate: %s", style_key, e)
+        # Judge down: take the SHORTEST candidate (tight captions score best on
+        # both axes) and flag the scores as unjudged rather than faking 5.0s.
+        log.warning("judge call failed for %s; falling back to shortest candidate: %s", style_key, e)
+        idx = min(range(len(candidates)), key=lambda i: len(candidates[i]))
         return {
-            "winner": candidates[0], "winner_index": 0,
-            "accuracy": 5.0, "tone": 5.0, "distinct": 5.0, "fit": 5.0,
-            "critique": "", "needs_regen": False, "all_scores": [],
+            "winner": candidates[idx], "winner_index": idx,
+            "accuracy": 0.0, "tone": 0.0, "distinct": 0.0, "fit": 0.0,
+            "critique": "", "needs_regen": False, "all_scores": [], "unjudged": True,
         }
 
     # Defensive: the judge may return a top-level array, a scalar, or index-keyed
@@ -135,6 +138,10 @@ def select_best(
 
     win = scores[idx]
     judge_regen = str(raw.get("regenerate", "")).strip()
+    # Regen fires ONLY on genuinely weak winners. The judge's free-text
+    # 'regenerate' field is advice, not a trigger: a judge told to reserve 9-10
+    # always has advice, and treating it as a trigger made regen the expected
+    # path (+2 calls per style) instead of the rescue path.
     weak = min(win["accuracy"], win["tone"]) < min_score
     critique = judge_regen or (win.get("justification", "") if weak else "")
 
@@ -146,6 +153,6 @@ def select_best(
         "distinct": win["distinct"],
         "fit": win["fit"],
         "critique": critique,
-        "needs_regen": bool(weak or judge_regen),
+        "needs_regen": weak,
         "all_scores": scores,
     }

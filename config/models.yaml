@@ -1,82 +1,98 @@
 # ============================================================================
-# MODEL-AGNOSTIC CONFIG
-# Launch day: the hackathon reveals the available Fireworks models. Edit ONLY
-# this file to swap them in. No code changes required.
-#
-# Fireworks model ids look like: accounts/fireworks/models/<name>
-# List available models: https://app.fireworks.ai/models  (or the API)
+# MODEL CONFIG
+# Per-stage models with provider overrides and fallback chains. The default
+# provider is Fireworks (api: below). Stages may name a provider from
+# `providers:` (e.g. gemini for Gemma 4) and list fallbacks tried in order on
+# any failure — a failing provider costs seconds, never the clip.
 # ============================================================================
 
 api:
   base_url: https://api.fireworks.ai/inference/v1
-  # Audio endpoint. Fireworks serves whisper at the same base in most regions.
   audio_base_url: https://api.fireworks.ai/inference/v1
-  timeout_s: 120
-  max_retries: 5          # tenacity handles backoff on 429/5xx
+  timeout_s: 25           # per request; the track rule is <30s/request
+  max_retries: 2          # tenacity, backoff clamped to 1-5s
+
+# Gemma 4 lives on the Gemini API's OpenAI-compatible endpoint (free tier) and
+# OpenRouter (fallback tier). Keys are baked at build time via build-args; when
+# a key is absent the provider is skipped and the chain falls through to
+# Fireworks, so the pipeline never depends on Gemma being reachable.
+providers:
+  gemini:
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key_env: GEMINI_API_KEY
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
 
 # --- STAGE A: Understanding (vision) -----------------------------------------
-# Extracts neutral ground-truth facts from frames + transcript. Accuracy engine.
-# Prefer a multimodal model. If a Gemma-3 vision model is offered, use it here
-# to strengthen the "Best Use of Gemma" prize story.
+# Neutral ground-truth fact sheet from frames + transcript. Accuracy engine.
+# Gemma 4 26B A4B is natively a video-understanding model, so 12 sampled frames
+# is its home turf, not a shoehorn.
 understand:
-  model: accounts/fireworks/models/kimi-k2p6   # only vision-capable model on this account
+  model: gemma-4-26b-a4b-it
+  provider: gemini
+  timeout_s: 30
+  fallbacks:
+    - { model: "google/gemma-4-26b-a4b-it", provider: openrouter }
+    - { model: "accounts/fireworks/models/kimi-k2p6", provider: "" }
   supports_vision: true
-  max_images: 10          # frames per request; sampler caps to this
-  image_max_edge: 768     # px; resize longest edge to save tokens
+  max_images: 12          # even sampling across the clip; scene detect is off
+  image_max_edge: 768
   image_format: jpeg
-  image_quality: 85
-  temperature: 0.2        # low = factual
-  max_tokens: 2000        # fact sheet JSON; reasoning disabled below
-  extra_body:
-    reasoning_effort: "none"   # kimi is a reasoning model; CoT otherwise eats the budget & truncates JSON
-
-# --- STAGE 3: Comedy-material extraction (text) ------------------------------
-# Cheap LLM pass over the fact sheet: lists the inherently absurd/ironic elements
-# and their tech-angle, so humor styles aim at grounded, pre-validated material
-# instead of free-associating (which is where hallucination creeps in).
-# Reuses the style model unless `model` is set. Skipped for the formal style.
-comedy:
-  enabled: true
-  model: ""               # empty => use the style model below
-  temperature: 0.7
-
-# --- STAGE B: Style rendering (text) -----------------------------------------
-# Turns the ground-truth into 4 styled captions via best-of-N + judge selection.
-# Tone engine. Set model to a Gemma text model to maximize Gemma-prize
-# eligibility, e.g. accounts/fireworks/models/gemma-3-27b-it
-style:
-  model: accounts/fireworks/models/kimi-k2p6   # reliable JSON output for candidate parsing
-  supports_vision: false
-  temperature: 0.85       # fallback temp if the per-style temps below are unused
-  max_tokens: 900         # N short candidates as JSON; reasoning disabled below
-  n_candidates: 3         # best-of-N: candidates generated per style
-  temperature_formal: 0.3 # formal wants precision, low variance
-  temperature_humor: 0.9  # humor/sarcasm want variance -> better jokes
+  image_quality: 85       # keep text/signage legible; a real accuracy edge
+  temperature: 0.2
+  max_tokens: 900
   extra_body:
     reasoning_effort: "none"
 
-# --- JUDGE: local eval (should differ from generator to avoid self-bias) -----
+# --- STAGE 3: Comedy-material extraction (text) ------------------------------
+# Reuses the style model (and its provider routes), i.e. Gemma 4 31B.
+comedy:
+  enabled: true
+  model: ""               # empty => the style model + its fallback chain
+  temperature: 0.7
+
+# --- STAGE B: Style rendering (text) -----------------------------------------
+style:
+  model: gemma-4-31b-it
+  provider: gemini
+  timeout_s: 15
+  fallbacks:
+    - { model: "google/gemma-4-31b-it", provider: openrouter }
+    - { model: "accounts/fireworks/models/kimi-k2p6", provider: "" }
+  supports_vision: false
+  temperature: 0.85
+  max_tokens: 900
+  n_candidates: 3
+  temperature_formal: 0.3
+  temperature_humor: 0.9
+  extra_body:
+    reasoning_effort: "none"
+
+# --- JUDGE: candidate selection ------------------------------------------------
+# Stays on Fireworks glm-5p2: a different model family referees Gemma's captions
+# blind (stronger prize story than Gemma judging itself), and it keeps a warm
+# Fireworks path alive as the last-resort fallback for every stage.
 judge:
-  model: accounts/fireworks/models/glm-5p2   # different family from style (avoids self-bias)
+  enabled: true           # best-of-N selection; critique.enabled only gates regen
+  model: accounts/fireworks/models/glm-5p2
+  timeout_s: 15
   supports_vision: false
   temperature: 0.0
-  max_tokens: 1500        # per-candidate scores JSON; reasoning disabled below
+  max_tokens: 500
   extra_body:
     reasoning_effort: "none"
 
 # --- ASR: audio transcription ------------------------------------------------
 asr:
-  # local = faster-whisper (offline, bundled). This account's key is NOT entitled
-  # to the Fireworks audio product (401), so local is the working path.
   backend: local          # local | fireworks | none
-  model: whisper-v3       # fireworks audio model id (only used if backend=fireworks)
-  # faster-whisper size: tiny|base|small|medium|large-v3|distil-large-v3.
-  # small = fast + solid multilingual. Bump to large-v3 for max accuracy on hard
-  # audio, or distil-large-v3 for near-large quality on English-heavy sets.
-  local_model_size: small
+  model: whisper-v3       # only used if backend=fireworks
+  # base is the latency sweet spot: ASR is a garnish on the fact sheet, not the
+  # dish, and the rival scored 0.83+ with no audio at all.
+  local_model_size: base
 
-# --- Self-critique regeneration loop (optional, costs credits) ---------------
+# --- Self-critique regeneration loop ------------------------------------------
 critique:
   enabled: true
-  min_score: 7.0          # regenerate a style if judged accuracy or tone < this
-  max_retries: 1          # extra regen attempts per style
+  min_score: 5.0          # the judge prompt demands stinginess; 6-8 is a GOOD score
+  max_retries: 1

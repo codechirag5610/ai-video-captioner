@@ -40,6 +40,11 @@ except Exception:  # pragma: no cover
     _JSON_FALLBACK = (ValueError,)
 
 
+# Fallback events (e.g. Gemma route failed over to Fireworks), recorded so the
+# harness can write an auditable run report next to results.json.
+RUN_EVENTS: list[dict[str, Any]] = []
+
+
 class FireworksClient:
     def __init__(self, api: ApiConfig):
         self.api = api
@@ -55,6 +60,19 @@ class FireworksClient:
             timeout=api.timeout_s,
             max_retries=0,
         )
+        self._route_clients: dict[tuple[str, str], OpenAI] = {}
+
+    def _client_for(self, route, timeout_s: float) -> OpenAI:
+        """One cached OpenAI client per (endpoint, key). Empty route fields mean
+        the default Fireworks client settings."""
+        base = route.base_url or self.api.base_url
+        key = route.api_key or self.api.api_key
+        cache_key = (base, key)
+        if cache_key not in self._route_clients:
+            self._route_clients[cache_key] = OpenAI(
+                api_key=key, base_url=base, timeout=timeout_s, max_retries=0
+            )
+        return self._route_clients[cache_key]
 
     # ------------------------------------------------------------------ chat
     def chat(
@@ -66,32 +84,61 @@ class FireworksClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> str:
-        """One chat completion. Returns the assistant text."""
+        """One chat completion. Walks the spec's route chain (primary provider,
+        then fallbacks) so a failing provider costs seconds, never the clip.
+        Returns the assistant text."""
+        timeout_s = float(spec.timeout_s or self.api.timeout_s)
+        routes = getattr(spec, "routes", None) or [None]
+        last_exc: Exception | None = None
+        for i, route in enumerate(routes):
+            try:
+                text, finish = self._chat_once(
+                    spec, route, messages, timeout_s,
+                    json_mode=json_mode, temperature=temperature, max_tokens=max_tokens,
+                )
+                self._last_finish_reason = finish
+                if i > 0 and route is not None:
+                    RUN_EVENTS.append({
+                        "event": "route_fallback", "stage_model": spec.model,
+                        "used": route.model, "provider": route.provider or "fireworks",
+                    })
+                return text
+            except Exception as e:  # noqa: BLE001 - any route failure falls through
+                last_exc = e
+                log.warning("route %s/%s failed for %s: %s", i + 1, len(routes),
+                            getattr(route, "model", spec.model), e)
+        raise last_exc if last_exc else RuntimeError("no routes configured")
+
+    def _chat_once(self, spec, route, messages, timeout_s, *, json_mode, temperature, max_tokens):
+        model = route.model if route is not None else spec.model
+        client = self._client_for(route, timeout_s) if route is not None else self._chat
 
         @retry(
             reraise=True,
             stop=stop_after_attempt(self.api.max_retries),
-            wait=wait_exponential(multiplier=1.5, min=2, max=60),
+            wait=wait_exponential(multiplier=1, min=1, max=5),  # clamped: a bad call costs seconds
             retry=retry_if_exception_type(_RETRYABLE),
             before_sleep=lambda rs: log.warning(
                 "retry %s/%s for %s: %s",
-                rs.attempt_number, self.api.max_retries, spec.model, rs.outcome.exception(),
+                rs.attempt_number, self.api.max_retries, model, rs.outcome.exception(),
             ),
         )
-        def _call() -> str:
+        def _call() -> tuple[str, str]:
             kwargs: dict[str, Any] = dict(
-                model=spec.model,
+                model=model,
                 messages=messages,
                 temperature=spec.temperature if temperature is None else temperature,
                 max_tokens=spec.max_tokens if max_tokens is None else max_tokens,
+                timeout=timeout_s,
             )
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
             if spec.extra_body:
                 # provider-specific body params, e.g. {"reasoning_effort": "none"}
                 kwargs["extra_body"] = spec.extra_body
-            resp = self._chat.chat.completions.create(**kwargs)
-            return resp.choices[0].message.content or ""
+            resp = client.chat.completions.create(**kwargs)
+            choice = resp.choices[0]
+            return choice.message.content or "", (choice.finish_reason or "")
 
         return _call()
 
@@ -107,7 +154,11 @@ class FireworksClient:
         try:
             text = self.chat(spec, messages, json_mode=True, **kwargs)
             return _parse_json(text)
-        except _JSON_FALLBACK as e:  # json_mode unsupported OR parse failure -> retry plain
+        except _JSON_FALLBACK as e:
+            # Only worth re-asking when the model actually finished ('stop');
+            # a max_tokens truncation would just truncate again.
+            if getattr(self, "_last_finish_reason", "") == "length":
+                raise
             log.debug("json_mode path failed (%s); retrying without response_format", e)
             text = self.chat(spec, messages, json_mode=False, **kwargs)
             return _parse_json(text)

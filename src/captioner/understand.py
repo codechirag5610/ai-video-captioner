@@ -118,14 +118,19 @@ def _normalize(gt: dict[str, Any]) -> dict[str, Any]:
 def _degraded_gt(transcript: dict[str, Any], reason: str) -> dict[str, Any]:
     """A minimal, transcript-only fact sheet used when frames are missing OR the
     vision call fails/can't be parsed. Keeps captions non-empty and honest rather
-    than zeroing all four styles on one bad Stage-A call."""
+    than zeroing all four styles on one bad Stage-A call.
+
+    The failure reason must NEVER reach a caption-visible field: a caption that
+    mentions 'analysis failed' is a guaranteed accuracy zero. It goes to the log
+    and (Stage-B-invisible) uncertain list only."""
+    log.warning("degraded fact sheet: %s", reason)
     text = (transcript.get("text") or "").strip()
     return _normalize({
-        "setting": "unknown", "mood": "unknown", "confidence": 0.1,
+        "setting": "a short video clip", "mood": "", "confidence": 0.1,
         "audio_description": text,
         "dialogue_summary": text,
-        "notable": reason,
-        "uncertain": ["Visual details unavailable — caption only what the transcript supports."],
+        "notable": (text.split(".")[0].strip() if text else ""),
+        "uncertain": [reason, "Visual details unavailable — caption only what the transcript supports."],
     })
 
 
