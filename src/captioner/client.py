@@ -87,6 +87,9 @@ class FireworksClient:
             )
             if json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
+            if spec.extra_body:
+                # provider-specific body params, e.g. {"reasoning_effort": "none"}
+                kwargs["extra_body"] = spec.extra_body
             resp = self._chat.chat.completions.create(**kwargs)
             return resp.choices[0].message.content or ""
 

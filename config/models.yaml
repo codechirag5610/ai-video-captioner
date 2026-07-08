@@ -19,14 +19,16 @@ api:
 # Prefer a multimodal model. If a Gemma-3 vision model is offered, use it here
 # to strengthen the "Best Use of Gemma" prize story.
 understand:
-  model: accounts/fireworks/models/qwen2p5-vl-72b-instruct   # PLACEHOLDER - swap launch day
+  model: accounts/fireworks/models/kimi-k2p6   # only vision-capable model on this account
   supports_vision: true
-  max_images: 16          # frames per request; sampler caps to this
+  max_images: 10          # frames per request; sampler caps to this
   image_max_edge: 768     # px; resize longest edge to save tokens
   image_format: jpeg
   image_quality: 85
   temperature: 0.2        # low = factual
-  max_tokens: 1500
+  max_tokens: 2000        # fact sheet JSON; reasoning disabled below
+  extra_body:
+    reasoning_effort: "none"   # kimi is a reasoning model; CoT otherwise eats the budget & truncates JSON
 
 # --- STAGE 3: Comedy-material extraction (text) ------------------------------
 # Cheap LLM pass over the fact sheet: lists the inherently absurd/ironic elements
@@ -43,25 +45,29 @@ comedy:
 # Tone engine. Set model to a Gemma text model to maximize Gemma-prize
 # eligibility, e.g. accounts/fireworks/models/gemma-3-27b-it
 style:
-  model: accounts/fireworks/models/gemma-3-27b-it            # PLACEHOLDER - swap launch day
+  model: accounts/fireworks/models/kimi-k2p6   # reliable JSON output for candidate parsing
   supports_vision: false
   temperature: 0.85       # fallback temp if the per-style temps below are unused
-  max_tokens: 700         # room for N numbered candidates in one call
-  n_candidates: 4         # best-of-N: candidates generated per style
+  max_tokens: 900         # N short candidates as JSON; reasoning disabled below
+  n_candidates: 3         # best-of-N: candidates generated per style
   temperature_formal: 0.3 # formal wants precision, low variance
   temperature_humor: 0.9  # humor/sarcasm want variance -> better jokes
+  extra_body:
+    reasoning_effort: "none"
 
 # --- JUDGE: local eval (should differ from generator to avoid self-bias) -----
 judge:
-  model: accounts/fireworks/models/llama-v3p3-70b-instruct   # PLACEHOLDER - swap launch day
+  model: accounts/fireworks/models/glm-5p2   # different family from style (avoids self-bias)
   supports_vision: false
   temperature: 0.0
-  max_tokens: 800
+  max_tokens: 1500        # per-candidate scores JSON; reasoning disabled below
+  extra_body:
+    reasoning_effort: "none"
 
 # --- ASR: audio transcription ------------------------------------------------
 asr:
-  backend: fireworks      # fireworks | local | none
-  model: whisper-v3       # fireworks audio model id
+  backend: none           # fireworks | local | none  (Whisper not provisioned on this account -> 403)
+  model: whisper-v3       # fireworks audio model id (unused while backend=none)
   # local backend uses faster-whisper; set size below if backend=local
   local_model_size: base
 

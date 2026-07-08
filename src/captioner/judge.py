@@ -23,8 +23,8 @@ SYSTEM = (
     "You are a strict, fair judge of short-video captions. You compare candidates "
     "against a ground-truth account and a style definition. Be discriminating: "
     "reserve 9-10 for captions that are both accurate and truly nail the style. "
-    "Any invented detail (something not in the account) caps that candidate's "
-    "accuracy at 3. Return strict JSON."
+    "Any invented detail (something not in the account, or anything the account "
+    "lists as UNCERTAIN) caps that candidate's accuracy at 3. Return strict JSON."
 )
 
 
@@ -43,7 +43,9 @@ def _build_prompt(style_key: str, gt_text: str, candidates: list[str], others: d
         f"ALREADY-CHOSEN CAPTIONS IN OTHER STYLES (for the distinctness check):\n{others_block}\n\n"
         f"CANDIDATES:\n{numbered}\n\n"
         "Score EACH candidate 1-10 on:\n"
-        "  accuracy: consistent with the account; asserts nothing not in it (any invented detail caps this at 3).\n"
+        "  accuracy: consistent with the account; asserts nothing not in it. Any invented detail "
+        "caps this at 3. Referencing or joking about ANYTHING listed under UNCERTAIN counts as an "
+        "invented detail and also caps accuracy at 3.\n"
         "  tone: matches the style definition's voice; would a reader label it as this style?\n"
         "  distinct: clearly different in voice from the already-chosen captions above.\n"
         f"  fit: {fit_line}\n\n"

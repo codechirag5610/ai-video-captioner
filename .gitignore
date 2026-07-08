@@ -1,5 +1,7 @@
 # Secrets
 .env
+.env.local
+*.key
 
 # Data / runtime artifacts
 clips/*
@@ -14,11 +16,22 @@ work/
 # Python
 __pycache__/
 *.py[cod]
-.venv/
-venv/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
+
+# Virtual environments. Use ./.venv only. The bin/lib/include/pyvenv.cfg entries
+# guard against an accidental `python -m venv .` created at the repo root (which
+# also overwrote this .gitignore once); safe here since the project has no such dirs.
+.venv/
+venv/
+env/
+bin/
+lib/
+lib64/
+include/
+share/
+pyvenv.cfg
 
 # OS
 .DS_Store

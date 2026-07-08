@@ -141,8 +141,11 @@ def _card_with_examples(style_key: str) -> str:
     card = STYLE_CARDS[style_key]
     examples = FEW_SHOT.get(style_key, [])
     if examples:
-        ex_lines = "\n".join(f'- "{cap}"' for _, cap in examples)
-        card += f"\nExamples of this style (unrelated videos):\n{ex_lines}"
+        # Show BOTH halves (facts -> caption) so the model learns the
+        # accuracy-anchoring habit, and the concrete nouns are clearly attributed
+        # to OTHER clips (guards against detail-bleed into the current clip).
+        ex_lines = "\n".join(f'FACTS: {gt}\n-> "{cap}"' for gt, cap in examples)
+        card += f"\nExamples of this style (from UNRELATED videos):\n{ex_lines}"
     return card
 
 
@@ -219,6 +222,7 @@ def generate_candidates(
 # "cloud"!->"clouds", "app"!->"apple", "RAM"!->"ramp".
 _SAFE_INFLECT_STEMS = [
     "deploy", "server", "debug", "compile", "upload", "download", "refactor",
+    "computer", "laptop", "smartphone", "phone",  # -> computers, phones, ...
 ]
 
 

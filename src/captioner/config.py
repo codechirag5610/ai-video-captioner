@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict
 
 import yaml
 from dotenv import load_dotenv
@@ -33,6 +33,10 @@ class ModelSpec:
     n_candidates: int = 4              # candidates generated per style
     temperature_formal: float = 0.3    # low temp: formal wants precision
     temperature_humor: float = 0.9     # high temp: humor/sarcasm want variance
+    # Passed verbatim into the request body. Use for provider-specific params like
+    # {"reasoning_effort": "none"} to disable a reasoning model's chain-of-thought
+    # (which otherwise burns the token budget and truncates the JSON answer).
+    extra_body: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ModelSpec":
