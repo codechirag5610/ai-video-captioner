@@ -147,12 +147,20 @@ class FireworksClient:
         extra_body = dict(spec.extra_body or {})
         eff_max = spec.max_tokens if max_tokens is None else max_tokens
         if provider == "gemini":
-            # Gemma 4 rejects thinking-budget controls outright (400) and ALWAYS
-            # prepends <thought> blocks that consume the completion budget: drop
-            # the param and give the thought room, then strip it on the way out.
-            extra_body.pop("reasoning_effort", None)
-            eff_max = max(int(eff_max * 2), eff_max + 1200)
             _GEMINI_PACER.wait(model)  # free tier: 15 RPM per model
+            if "gemma" in model.lower():
+                # Gemma 4 rejects thinking-budget controls outright (400) and
+                # ALWAYS prepends <thought> blocks that consume the completion
+                # budget: drop the param and give the thought room, then strip
+                # it on the way out.
+                extra_body.pop("reasoning_effort", None)
+                eff_max = max(int(eff_max * 2), eff_max + 1200)
+            else:
+                # Non-Gemma Gemini (e.g. gemini-2.5-flash) IS a thinking model
+                # and will spend its entire budget on hidden thoughts unless
+                # reasoning_effort stays 'none' (which it accepts, unlike Gemma).
+                extra_body.setdefault("reasoning_effort", "none")
+                eff_max = max(int(eff_max * 1.5), eff_max + 400)
 
         @retry(
             reraise=True,

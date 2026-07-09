@@ -26,14 +26,16 @@ providers:
 
 # --- STAGE A: Understanding (vision) -----------------------------------------
 # Neutral ground-truth fact sheet from frames + transcript. Accuracy engine.
-# Gemma 4 26B A4B is natively a video-understanding model, so 12 sampled frames
-# is its home turf, not a shoehorn.
+# Gemma 4 31B IT is multimodal (text+image), so one Gemma model handles both the
+# vision fact sheet here and the caption writing below. The 26B A4B variant is
+# unreachable on the free key, so 31B is the reliable Gemma path; a multimodal
+# Gemini flash model backs it up so a Gemma 503/429 never costs the clip.
 understand:
-  model: gemma-4-26b-a4b-it
+  model: gemma-4-31b-it
   provider: gemini
   timeout_s: 45   # thinking models: thought tokens add latency
   fallbacks:
-    - { model: "google/gemma-4-26b-a4b-it", provider: openrouter }
+    - { model: gemini-2.5-flash, provider: gemini }
     - { model: "accounts/fireworks/models/kimi-k2p6", provider: "" }
   supports_vision: true
   max_images: 12          # even sampling across the clip; scene detect is off
@@ -58,12 +60,12 @@ style:
   provider: gemini
   timeout_s: 60   # thinking generations run long
   fallbacks:
-    - { model: "google/gemma-4-31b-it", provider: openrouter }
+    - { model: gemini-2.5-flash, provider: gemini }
     - { model: "accounts/fireworks/models/kimi-k2p6", provider: "" }
   supports_vision: false
   temperature: 0.85
+  n_candidates: 1         # free-tier 15 RPM can't sustain best-of-N across a clip set
   max_tokens: 900
-  n_candidates: 3
   temperature_formal: 0.3
   temperature_humor: 0.9
   extra_body:
